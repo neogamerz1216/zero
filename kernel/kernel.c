@@ -11,6 +11,14 @@
 #include "mm.h"
 #include "syscall.h"
 #include "../shell/shell.h"
+#include "../drivers/pci.h"
+#include "../drivers/net.h"
+#include "../drivers/drivman.h"
+
+/* Built-in driver wrappers for the driver installation manager. */
+static int drv_pci_init(void)   { pci_init();   return 0; }
+static int drv_net_init(void)   { net_init();   return 0; }
+static int drv_kbd_init(void)   { keyboard_init(); return 0; }
 
 void kernel_main(void) {
     serial_init();
@@ -55,6 +63,21 @@ void kernel_main(void) {
     volume_init();
     serial_puts("[ZeroOS Kernel] Volumes Initialized.\n");
     timer_sleep_ms(600);
+
+    vga_update_boot_step("Scanning PCI Bus & Drivers...", 85);
+    pci_init();
+    drvman_init();
+    drvman_register("pci",   drv_pci_init);
+    drvman_register("net",   drv_net_init);
+    drvman_register("keyboard", drv_kbd_init);
+    drvman_init_all();
+    serial_puts("[ZeroOS Kernel] PCI bus scanned; driver manager armed.\n");
+    timer_sleep_ms(500);
+
+    vga_update_boot_step("Bringing Up ZeroNet Networking...", 90);
+    net_init();
+    serial_puts("[ZeroOS Kernel] ZeroNET loopback + vnet online.\n");
+    timer_sleep_ms(500);
 
     vga_update_boot_step("Starting Process Engine & Shell Task...", 100);
     process_init();

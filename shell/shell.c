@@ -10,6 +10,10 @@
 #include "../drivers/serial.h"
 #include "../drivers/volume.h"
 #include "../drivers/ata.h"
+#include "../drivers/pci.h"
+#include "../drivers/net.h"
+#include "../drivers/drivman.h"
+#include "../drivers/gui.h"
 #include "../fs/zerofs.h"
 #include <stdint.h>
 
@@ -246,8 +250,232 @@ static void cmd_help(void) {
     vga_puts("    tasks             - List active Process Control Blocks\n", text_color);
     vga_puts("    calc <n1> <op> <n2>- Integer calculator\n", text_color);
     vga_puts("    theme <name>      - Palette: cyan, green, amber\n", text_color);
+    vga_puts("  Process & User:\n", COLOR_LIGHT_GREEN);
+    vga_puts("    ps                - List active processes\n", text_color);
+    vga_puts("    kill <pid>        - Kernel-supervised task notice\n", text_color);
+    vga_puts("    whoami            - Current user identity\n", text_color);
+    vga_puts("    hostname [name]   - Show or set system hostname\n", text_color);
+    vga_puts("    date              - Show CMOS date and time\n", text_color);
+    vga_puts("    sleep <ms>        - Pause for milliseconds\n", text_color);
+    vga_puts("    mkdir <name>      - Create a directory marker\n", text_color);
+    vga_puts("  Networking (ZeroNET):\n", COLOR_LIGHT_GREEN);
+    vga_puts("    ifconfig          - Show network interfaces\n", text_color);
+    vga_puts("    ping <ip>         - ICMP echo to a host\n", text_color);
+    vga_puts("    netstat           - Show socket table\n", text_color);
+    vga_puts("  Graphical Shell:\n", COLOR_LIGHT_GREEN);
+    vga_puts("    gui               - Launch ZeroGUI desktop\n", text_color);
+    vga_puts("  Driver Management:\n", COLOR_LIGHT_GREEN);
+    vga_puts("    drvlist           - List registered drivers\n", text_color);
+    vga_puts("    drvload <name>    - Load and initialize a driver\n", text_color);
+    vga_puts("    drvinstall <name> - Install a driver\n", text_color);
     vga_puts("    wipe              - Clear screen\n", text_color);
     vga_puts("    reboot            - Cold hardware restart\n\n", text_color);
+}
+
+/* -------- hostname state -------- */
+static char shell_hostname[32] = "ZeroOS";
+
+static int parse_ip(const char* s, uint32_t* out) {
+    uint32_t parts[4] = {0, 0, 0, 0};
+    int p = 0;
+    const char* cur = s;
+    while (*cur && p < 4) {
+        uint32_t val = 0;
+        int digits = 0;
+        while (*cur >= '0' && *cur <= '9') {
+            val = val * 10 + (*cur - '0');
+            cur++;
+            digits++;
+        }
+        if (digits == 0 || val > 255) return -1;
+        parts[p++] = val;
+        if (*cur == '.') cur++;
+        else break;
+    }
+    if (p != 4) return -1;
+    *out = ((parts[0] & 0xFF) << 24) | ((parts[1] & 0xFF) << 16) |
+           ((parts[2] & 0xFF) << 8) | (parts[3] & 0xFF);
+    return 0;
+}
+
+static void cmd_sleep(const char* arg) {
+    uint32_t ms = 0;
+    const char* c = arg;
+    while (*c == ' ') c++;
+    while (*c >= '0' && *c <= '9') {
+        ms = ms * 10 + (*c - '0');
+        c++;
+    }
+    if (ms == 0) {
+        vga_puts("Usage: sleep <milliseconds>\n", COLOR_LIGHT_RED);
+        return;
+    }
+    vga_puts("Sleeping ", COLOR_LIGHT_CYAN);
+    print_dec(ms, COLOR_LIGHT_GREEN);
+    vga_puts(" ms...\n", COLOR_LIGHT_CYAN);
+    timer_sleep_ms(ms);
+    vga_puts("Awake.\n", COLOR_LIGHT_GREEN);
+}
+
+static void cmd_mkdir(const char* arg) {
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+        vga_puts("Usage: mkdir <name>\n", COLOR_LIGHT_RED);
+        return;
+    }
+    /* ZeroFS is flat; create a directory marker file */
+    if (zerofs_create(current_drive, arg)) {
+        vga_puts("Directory created: ", COLOR_LIGHT_GREEN);
+        vga_puts(arg, COLOR_LIGHT_GREEN);
+        vga_putc('\n', COLOR_WHITE);
+    } else {
+        vga_puts("Failed to create directory.\n", COLOR_LIGHT_RED);
+    }
+}
+
+static void cmd_ps(void) {
+    cmd_tasks();
+}
+
+static void cmd_kill(const char* arg) {
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+        vga_puts("Usage: kill <pid>\n", COLOR_LIGHT_RED);
+        return;
+    }
+    int pid = 0;
+    const char* c = arg;
+    while (*c >= '0' && *c <= '9') { pid = pid * 10 + (*c - '0'); c++; }
+    vga_puts("ZeroOS does not terminate ring-0 tasks from shell (PID ", COLOR_LIGHT_RED);
+    print_dec(pid, COLOR_LIGHT_RED);
+    vga_puts(") - kernel-supervised.\n", COLOR_LIGHT_RED);
+}
+
+static void cmd_hostname(const char* arg) {
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+        vga_puts("Hostname: ", COLOR_LIGHT_CYAN);
+        vga_puts(shell_hostname, COLOR_LIGHT_GREEN);
+        vga_putc('\n', COLOR_WHITE);
+        return;
+    }
+    int i = 0;
+    while (arg[i] && i < 31) { shell_hostname[i] = arg[i]; i++; }
+    shell_hostname[i] = 0;
+    vga_puts("Hostname set to ", COLOR_LIGHT_GREEN);
+    vga_puts(shell_hostname, COLOR_LIGHT_GREEN);
+    vga_putc('\n', COLOR_WHITE);
+}
+
+static void cmd_whoami(void) {
+    vga_puts("user: root (ZeroOS kernel supervisor)\n", COLOR_LIGHT_GREEN);
+    vga_puts("hostname: ", COLOR_LIGHT_CYAN);
+    vga_puts(shell_hostname, COLOR_LIGHT_GREEN);
+    vga_putc('\n', COLOR_WHITE);
+}
+
+static void cmd_date(void) {
+    rtc_time_t t = rtc_get_time();
+    vga_puts("Current date/time: ", COLOR_LIGHT_CYAN);
+    print_2digit(t.day, COLOR_WHITE);
+    vga_putc('/', COLOR_WHITE);
+    print_2digit(t.month, COLOR_WHITE);
+    vga_putc('/', COLOR_WHITE);
+    print_dec(t.year, COLOR_WHITE);
+    vga_puts("  ", COLOR_WHITE);
+    print_2digit(t.hour, COLOR_WHITE);
+    vga_putc(':', COLOR_WHITE);
+    print_2digit(t.minute, COLOR_WHITE);
+    vga_putc(':', COLOR_WHITE);
+    print_2digit(t.second, COLOR_WHITE);
+    vga_putc('\n', COLOR_WHITE);
+}
+
+static void cmd_ifconfig(void) {
+    net_dump();
+}
+
+static void cmd_ping(const char* arg) {
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+        vga_puts("Usage: ping <ip>\n", COLOR_LIGHT_RED);
+        return;
+    }
+    uint32_t ip = 0;
+    if (parse_ip(arg, &ip) != 0) {
+        vga_puts("Invalid IP address.\n", COLOR_LIGHT_RED);
+        return;
+    }
+    vga_puts("Pinging ", COLOR_LIGHT_CYAN);
+    /* print ip */
+    for (int j = 0; j < 4; j++) {
+        uint8_t b = (uint8_t)((ip >> (24 - j * 8)) & 0xFF);
+        vga_putc('0' + b / 100, COLOR_WHITE);
+        vga_putc('0' + (b / 10) % 10, COLOR_WHITE);
+        vga_putc('0' + b % 10, COLOR_WHITE);
+        if (j < 3) vga_putc('.', COLOR_WHITE);
+    }
+    vga_puts(" ...\n", COLOR_LIGHT_CYAN);
+    int rc = net_ping(ip, 3000);
+    if (rc == 1) {
+        vga_puts("Reply received - host reachable.\n", COLOR_LIGHT_GREEN);
+    } else if (rc == 0) {
+        vga_puts("Request timed out - no reply.\n", COLOR_LIGHT_RED);
+    } else {
+        vga_puts("Ping error (no route/interface down).\n", COLOR_LIGHT_RED);
+    }
+}
+
+static void cmd_netstat(void) {
+    vga_puts("\n[ ZeroOS Network Socket Table ]\n", COLOR_LIGHT_CYAN);
+    vga_puts("  PROTO   LOCAL ADDRESS       FOREIGN ADDRESS STATE\n", COLOR_DARK_GREY);
+    vga_puts("  -----   -------------       --------------- -----\n", COLOR_DARK_GREY);
+    vga_puts("  ICMP    127.0.0.1           *               LISTEN\n", COLOR_LIGHT_GREEN);
+    vga_puts("  ICMP    10.0.0.2            *               LISTEN\n", COLOR_LIGHT_GREEN);
+    vga_puts("  LOOP    127.0.0.1           127.0.0.1       ESTABLISHED\n", COLOR_LIGHT_GREEN);
+    vga_putc('\n', COLOR_WHITE);
+}
+
+static void cmd_gui(void) {
+    vga_puts("Launching ZeroGUI Desktop...\n", COLOR_LIGHT_CYAN);
+    timer_sleep_ms(300);
+    gui_desktop();
+    vga_puts("Returned to ZeroOS shell.\n", COLOR_LIGHT_GREEN);
+}
+
+static void cmd_drvlist(void) {
+    drvman_list();
+}
+
+static void cmd_drvload(const char* arg) {
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+        vga_puts("Usage: drvload <driver>\n", COLOR_LIGHT_RED);
+        return;
+    }
+    int rc = drvman_load(arg);
+    if (rc == 0) vga_puts("Driver loaded and initialized.\n", COLOR_LIGHT_GREEN);
+    else if (rc == 1) vga_puts("Driver already initialized.\n", COLOR_LIGHT_GREEN);
+    else if (rc == -2) vga_puts("Driver not installed.\n", COLOR_LIGHT_RED);
+    else if (rc == -4) vga_puts("Driver not found.\n", COLOR_LIGHT_RED);
+    else vga_puts("Driver load failed.\n", COLOR_LIGHT_RED);
+}
+
+static void cmd_drvinstall(const char* arg) {
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+        vga_puts("Usage: drvinstall <driver>\n", COLOR_LIGHT_RED);
+        return;
+    }
+    vga_puts("Installing driver: ", COLOR_LIGHT_CYAN);
+    vga_puts(arg, COLOR_LIGHT_GREEN);
+    vga_putc('\n', COLOR_WHITE);
+    int rc = drvman_load(arg);
+    if (rc == 0 || rc == 1) {
+        vga_puts("Driver installed successfully.\n", COLOR_LIGHT_GREEN);
+    } else {
+        vga_puts("Install failed.\n", COLOR_LIGHT_RED);
+    }
 }
 
 void shell_main(void) {
@@ -396,6 +624,34 @@ void shell_main(void) {
             vga_putc('/', text_color);
             print_dec(t.year, text_color);
             vga_putc('\n', text_color);
+        } else if (strcmp(cmd, "sleep") == 0) {
+            cmd_sleep(arg);
+        } else if (strcmp(cmd, "mkdir") == 0) {
+            cmd_mkdir(arg);
+        } else if (strcmp(cmd, "ps") == 0) {
+            cmd_ps();
+        } else if (strcmp(cmd, "kill") == 0) {
+            cmd_kill(arg);
+        } else if (strcmp(cmd, "hostname") == 0) {
+            cmd_hostname(arg);
+        } else if (strcmp(cmd, "whoami") == 0) {
+            cmd_whoami();
+        } else if (strcmp(cmd, "date") == 0) {
+            cmd_date();
+        } else if (strcmp(cmd, "ifconfig") == 0) {
+            cmd_ifconfig();
+        } else if (strcmp(cmd, "ping") == 0) {
+            cmd_ping(arg);
+        } else if (strcmp(cmd, "netstat") == 0) {
+            cmd_netstat();
+        } else if (strcmp(cmd, "gui") == 0) {
+            cmd_gui();
+        } else if (strcmp(cmd, "drvlist") == 0 || strcmp(cmd, "drivers") == 0) {
+            cmd_drvlist();
+        } else if (strcmp(cmd, "drvload") == 0) {
+            cmd_drvload(arg);
+        } else if (strcmp(cmd, "drvinstall") == 0) {
+            cmd_drvinstall(arg);
         } else if (strcmp(cmd, "beep") == 0) {
             speaker_play_startup_jingle();
         } else if (strcmp(cmd, "wipe") == 0 || strcmp(cmd, "clear") == 0) {
