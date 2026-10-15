@@ -55,13 +55,18 @@ void keyboard_handler(void) {
 }
 
 char keyboard_getchar(void) {
-    while (buf_head == buf_tail) {
+    char value;
+    while (!keyboard_try_getchar(&value)) {
         __asm__ volatile ("sti; hlt");
     }
+    return value;
+}
 
-    char c = kbd_buffer[buf_tail];
+int keyboard_try_getchar(char* value) {
+    if (buf_head == buf_tail) return 0;
+    *value = kbd_buffer[buf_tail];
     buf_tail = (buf_tail + 1) % KBD_BUFFER_SIZE;
-    return c;
+    return 1;
 }
 
 void keyboard_drain(void) {

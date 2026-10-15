@@ -1,6 +1,7 @@
 #include "gui.h"
 #include "../drivers/vga.h"
 #include "../drivers/keyboard.h"
+#include "../drivers/mouse.h"
 #include "../drivers/timer.h"
 #include "../drivers/rtc.h"
 #include "../drivers/net.h"
@@ -10,21 +11,26 @@
 
 static gui_desktop_t desktop;
 static int gui_running = 1;
+static gui_widget_t widget_pool[32];
+static int widget_pool_count;
 
 /* ----- primitive drawing ----- */
 
 static void gui_fill_rect(int x, int y, int w, int h, uint8_t bg, char ch) {
     for (int cy = y; cy < y + h && cy < GUI_HEIGHT; cy++) {
         for (int cx = x; cx < x + w && cx < GUI_WIDTH; cx++) {
-            VGA_MEMORY[cy * GUI_WIDTH + cx] = (uint16_t)ch | ((uint16_t)bg << 8);
+            VGA_MEMORY[cy * GUI_WIDTH + cx] = (uint16_t)ch | ((uint16_t)bg << 12);
         }
     }
 }
 
 static void gui_draw_text(int x, int y, const char* text, uint8_t fg, uint8_t bg) {
+    if (y < 0 || y >= GUI_HEIGHT) return;
     int attr = ((uint8_t)bg << 4) | (uint8_t)fg;
     for (int i = 0; text[i] && x + i < GUI_WIDTH; i++) {
-        VGA_MEMORY[y * GUI_WIDTH + x + i] = (uint16_t)text[i] | ((uint16_t)attr << 8);
+        if (x + i >= 0) {
+            VGA_MEMORY[y * GUI_WIDTH + x + i] = (uint16_t)text[i] | ((uint16_t)attr << 8);
+        }
     }
 }
 
@@ -50,10 +56,13 @@ static void gui_draw_border(gui_window_t* win) {
 /* ----- widgets ----- */
 
 static void gui_label_draw(gui_widget_t* w, int x, int y) {
-    (void)x; (void)y;
     int attr = ((uint8_t)GUI_WINDOW_BG << 4) | (uint8_t)GUI_LABEL_TEXT;
-    for (int i = 0; w->label[i] && w->x + i < GUI_WIDTH; i++) {
-        VGA_MEMORY[w->y * GUI_WIDTH + w->x + i] = (uint16_t)w->label[i] | ((uint16_t)attr << 8);
+    for (int i = 0; w->label[i] && x + w->x + i < GUI_WIDTH; i++) {
+        int px = x + w->x + i;
+        int py = y + w->y;
+        if (px >= 0 && py >= 0 && py < GUI_HEIGHT) {
+            VGA_MEMORY[py * GUI_WIDTH + px] = (uint16_t)w->label[i] | ((uint16_t)attr << 8);
+        }
     }
 }
 static int gui_label_key(gui_widget_t* w, char c) {
@@ -62,22 +71,26 @@ static int gui_label_key(gui_widget_t* w, char c) {
 }
 
 static void gui_button_draw(gui_widget_t* w, int x, int y) {
-    (void)x; (void)y;
     uint8_t bg = w->focused ? GUI_BUTTON_FOCUS : GUI_BUTTON_BG;
     uint8_t fg = GUI_BUTTON_TEXT;
     int attr = ((uint8_t)bg << 4) | (uint8_t)fg;
     /* button face */
-    for (int cx = w->x; cx < w->x + w->w && cx < GUI_WIDTH; cx++) {
-        VGA_MEMORY[w->y * GUI_WIDTH + cx] = (uint16_t)' ' | ((uint16_t)attr << 8);
+    int px = x + w->x;
+    int py = y + w->y;
+    for (int cx = px; cx < px + w->w && cx < GUI_WIDTH; cx++) {
+        if (cx >= 0 && py >= 0 && py < GUI_HEIGHT) {
+            VGA_MEMORY[py * GUI_WIDTH + cx] = (uint16_t)' ' | ((uint16_t)attr << 8);
+        }
     }
     /* center text */
-    int tx = w->x + (w->w - (int)0) / 2;
     int tlen = 0;
     while (w->label[tlen]) tlen++;
-    tx = w->x + (w->w - tlen) / 2;
-    if (tx < w->x) tx = w->x;
-    for (int i = 0; w->label[i] && tx + i < w->x + w->w; i++) {
-        VGA_MEMORY[w->y * GUI_WIDTH + tx + i] = (uint16_t)w->label[i] | ((uint16_t)attr << 8);
+    int tx = px + (w->w - tlen) / 2;
+    if (tx < px) tx = px;
+    for (int i = 0; w->label[i] && tx + i < px + w->w; i++) {
+        if (tx + i >= 0 && py >= 0 && py < GUI_HEIGHT) {
+            VGA_MEMORY[py * GUI_WIDTH + tx + i] = (uint16_t)w->label[i] | ((uint16_t)attr << 8);
+        }
     }
 }
 static int gui_button_key(gui_widget_t* w, char c) {
@@ -91,12 +104,8 @@ static int gui_button_key(gui_widget_t* w, char c) {
 }
 
 gui_widget_t* gui_label_new(int x, int y, const char* text) {
-    gui_widget_t* w = (gui_widget_t*)0;
-    /* allocate from a static pool is complex; use a static buffer */
-    static gui_widget_t pool[32];
-    static int pool_n = 0;
-    if (pool_n >= 32) return 0;
-    w = &pool[pool_n++];
+    if (widget_pool_count >= 32) return 0;
+    gui_widget_t* w = &widget_pool[widget_pool_count++];
     w->x = x; w->y = y; w->w = 0; w->h = 1;
     w->focusable = 0; w->focused = 0;
     w->draw = gui_label_draw; w->key = gui_label_key;
@@ -107,11 +116,8 @@ gui_widget_t* gui_label_new(int x, int y, const char* text) {
 }
 
 gui_widget_t* gui_button_new(int x, int y, int wd, const char* text) {
-    static gui_widget_t pool[32];
-    static int pool_n = 0;
-    gui_widget_t* w;
-    if (pool_n >= 32) return 0;
-    w = &pool[pool_n++];
+    if (widget_pool_count >= 32) return 0;
+    gui_widget_t* w = &widget_pool[widget_pool_count++];
     w->x = x; w->y = y; w->w = wd; w->h = 1;
     w->focusable = 1; w->focused = 0;
     w->draw = gui_button_draw; w->key = gui_button_key;
@@ -124,7 +130,10 @@ gui_widget_t* gui_button_new(int x, int y, int wd, const char* text) {
 void gui_window_add(gui_window_t* win, gui_widget_t* w) {
     w->next = win->widgets;
     win->widgets = w;
-    if (!win->focus && w->focusable) win->focus = w;
+    if (!win->focus && w->focusable) {
+        win->focus = w;
+        w->focused = 1;
+    }
 }
 
 /* ----- window drawing ----- */
@@ -134,7 +143,7 @@ static void gui_window_draw(gui_window_t* win) {
     gui_draw_border(win);
     gui_widget_t* w = win->widgets;
     while (w) {
-        w->draw(w, 0, 0);
+        w->draw(w, win->x + 1, win->y + 2);
         w = w->next;
     }
 }
@@ -145,7 +154,7 @@ static void gui_desktop_draw(void) {
     gui_fill_rect(0, 0, GUI_WIDTH, GUI_HEIGHT, GUI_BG, ' ');
     /* desktop title banner */
     gui_draw_text(2, 0, "ZeroGUI Desktop  |  ZeroOS Native Windowing System", COLOR_WHITE, GUI_BG);
-    gui_draw_text(2, 1, "TAB=next focus  ENTER=activate  Arrows=move  ESC=exit to shell",
+    gui_draw_text(2, 1, "TAB=focus  ENTER=activate  Mouse=click  ESC=shell",
                   COLOR_LIGHT_GREY, GUI_BG);
     /* clock */
     rtc_time_t t = rtc_get_time();
@@ -159,17 +168,21 @@ static void gui_desktop_draw(void) {
     for (int i = 0; i < desktop.window_count; i++) {
         gui_window_draw(&desktop.windows[i]);
     }
-    /* focus indicator */
-    vga_puts("Focus: ", COLOR_DARK_GREY);
+    gui_fill_rect(0, GUI_HEIGHT - 1, GUI_WIDTH, 1, COLOR_DARK_GREY, ' ');
+    gui_draw_text(1, GUI_HEIGHT - 1, "ZeroOS", COLOR_WHITE, COLOR_DARK_GREY);
+    gui_draw_text(10, GUI_HEIGHT - 1, "Mouse: click windows and buttons", COLOR_LIGHT_GREY, COLOR_DARK_GREY);
     if (desktop.focus_win >= 0 && desktop.focus_win < desktop.window_count) {
-        vga_puts(desktop.windows[desktop.focus_win].title, COLOR_LIGHT_CYAN);
-    } else {
-        vga_puts("desktop", COLOR_DARK_GREY);
+        gui_draw_text(57, GUI_HEIGHT - 1, desktop.windows[desktop.focus_win].title,
+                      COLOR_LIGHT_CYAN, COLOR_DARK_GREY);
     }
-    vga_puts("   |   [ZeroOS]", COLOR_DARK_GREY);
+    int mouse_x, mouse_y;
+    mouse_get_state(&mouse_x, &mouse_y, 0);
+    VGA_MEMORY[mouse_y * GUI_WIDTH + mouse_x] = (uint16_t)'X' |
+        ((uint16_t)((COLOR_BLACK << 4) | COLOR_WHITE) << 8);
 }
 
 static void gui_desktop_build(void) {
+    widget_pool_count = 0;
     desktop.window_count = 0;
     desktop.focus_win = 0;
 
@@ -204,15 +217,38 @@ static void gui_desktop_build(void) {
     w3->widgets = 0; w3->focus = 0;
     for (int i = 0; i < 16 && "Network Status"[i]; i++) w3->title[i] = "Network Status"[i];
     w3->title[16] = 0;
-    gui_window_add(w3, gui_label_new(2, 2, "lo:   127.0.0.1  [UP]"));
-    gui_window_add(w3, gui_label_new(2, 3, "vnet: 10.0.0.2   [UP]"));
-    gui_window_add(w3, gui_label_new(2, 4, "ping 127.0.0.1 -> OK"));
+    gui_window_add(w3, gui_label_new(2, 2, "lo:   127.0.0.1  [SIM]"));
+    gui_window_add(w3, gui_label_new(2, 3, "vnet: 10.0.0.2   [SIM]"));
+    gui_window_add(w3, gui_label_new(2, 4, "vnet: no hardware link"));
     gui_window_add(w3, gui_button_new(2, 6, 12, " netstat "));
 }
 
 static int gui_widget_invoke_key(gui_widget_t* w, char c) {
     if (w->key) return w->key(w, c);
     return 0;
+}
+
+static void gui_mouse_click(int mouse_x, int mouse_y) {
+    for (int i = desktop.window_count - 1; i >= 0; i--) {
+        gui_window_t* win = &desktop.windows[i];
+        if (!win->visible || mouse_x < win->x || mouse_x >= win->x + win->w ||
+            mouse_y < win->y || mouse_y >= win->y + win->h) continue;
+
+        desktop.focus_win = i;
+        for (gui_widget_t* w = win->widgets; w; w = w->next) {
+            w->focused = 0;
+            int left = win->x + 1 + w->x;
+            int top = win->y + 2 + w->y;
+            if (w->focusable && mouse_x >= left && mouse_x < left + w->w &&
+                mouse_y >= top && mouse_y < top + w->h) {
+                w->focused = 1;
+                win->focus = w;
+                gui_widget_invoke_key(w, '\n');
+                break;
+            }
+        }
+        return;
+    }
 }
 
 static void gui_cycle_focus(int forward) {
@@ -258,10 +294,23 @@ void gui_desktop(void) {
     vga_clear(GUI_BG);
     vga_enable_cursor(0, 0); /* hide cursor during GUI */
     gui_desktop_build();
+    uint8_t previous_buttons = 0;
 
     while (gui_running) {
         gui_desktop_draw();
-        char c = keyboard_getchar();
+        int mouse_x, mouse_y;
+        uint8_t buttons;
+        mouse_get_state(&mouse_x, &mouse_y, &buttons);
+        if ((buttons & 1) && !(previous_buttons & 1)) {
+            gui_mouse_click(mouse_x, mouse_y);
+        }
+        previous_buttons = buttons;
+
+        char c;
+        if (!keyboard_try_getchar(&c)) {
+            timer_sleep_ms(16);
+            continue;
+        }
         switch (c) {
         case 27:  /* ESC */
             gui_running = 0;

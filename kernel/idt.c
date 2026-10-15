@@ -31,6 +31,7 @@ extern void isr28(void); extern void isr29(void); extern void isr30(void); exter
 
 extern void isr32_timer(void);
 extern void isr33_keyboard(void);
+extern void isr44_mouse(void);
 
 static inline uint64_t read_cr2(void) {
     uint64_t v;
@@ -139,6 +140,7 @@ void idt_init(void) {
 
     idt_set_gate(32, (uint64_t)isr32_timer, 0);
     idt_set_gate(33, (uint64_t)isr33_keyboard, 0);
+    idt_set_gate(44, (uint64_t)isr44_mouse, 0);
 
     idtr.base = (uint64_t)&idt[0];
     idtr.limit = (uint16_t)(sizeof(idt) - 1);

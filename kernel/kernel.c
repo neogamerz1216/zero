@@ -1,6 +1,7 @@
 #include "../drivers/vga.h"
 #include "../drivers/timer.h"
 #include "../drivers/keyboard.h"
+#include "../drivers/mouse.h"
 #include "../drivers/rtc.h"
 #include "../drivers/speaker.h"
 #include "../drivers/serial.h"
@@ -19,6 +20,7 @@
 static int drv_pci_init(void)   { pci_init();   return 0; }
 static int drv_net_init(void)   { net_init();   return 0; }
 static int drv_kbd_init(void)   { keyboard_init(); return 0; }
+static int drv_mouse_init(void) { mouse_init(); return 0; }
 
 void kernel_main(void) {
     serial_init();
@@ -70,6 +72,7 @@ void kernel_main(void) {
     drvman_register("pci",   drv_pci_init);
     drvman_register("net",   drv_net_init);
     drvman_register("keyboard", drv_kbd_init);
+    drvman_register("mouse", drv_mouse_init);
     drvman_init_all();
     serial_puts("[ZeroOS Kernel] PCI bus scanned; driver manager armed.\n");
     timer_sleep_ms(500);
